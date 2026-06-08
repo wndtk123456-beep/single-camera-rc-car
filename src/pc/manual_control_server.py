@@ -1,6 +1,7 @@
 ﻿import os
 import socket
 import time
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -8,10 +9,11 @@ import numpy as np
 USE_DETECTION = False
 MIRROR_LEFT_RIGHT = True
 KEY_HOLD_SEC = 0.10
+MODEL_PATH = Path(__file__).resolve().parents[2] / "models" / "last.onnx"
 
 if USE_DETECTION:
     import yolo_detector
-    yolo_detector.load_model('last.onnx')
+    yolo_detector.load_model(str(MODEL_PATH))
 
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

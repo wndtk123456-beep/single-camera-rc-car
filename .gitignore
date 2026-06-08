@@ -23,7 +23,4 @@ runs/
 *.pt
 *.pth
 *.onnx
-!src/raspberry_cam/last.onnx
-!experiments/ir_line_following/ir_model.pt
-!experiments/ir_line_following/seq_ir_model.pt
-
+!models/last.onnx

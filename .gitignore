@@ -1,0 +1,29 @@
+__pycache__/
+*.py[cod]
+.vscode/
+.idea/
+
+# Local runtime captures
+saved/
+*.avi
+*.mp4
+*.mov
+*.mkv
+
+# Large local archives and raw datasets
+*.zip
+datasets/
+dataset/
+data/
+
+# Training outputs not intentionally committed
+runs/
+*.pkl
+*.pickle
+*.pt
+*.pth
+*.onnx
+!src/raspberry_cam/last.onnx
+!experiments/ir_line_following/ir_model.pt
+!experiments/ir_line_following/seq_ir_model.pt
+

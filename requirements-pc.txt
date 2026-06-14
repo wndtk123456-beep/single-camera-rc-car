@@ -1,4 +1,6 @@
 opencv-python
 numpy
-onnxruntime
-
+Pillow
+torch
+torchvision
+ultralytics

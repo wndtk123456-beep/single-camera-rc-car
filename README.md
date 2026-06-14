@@ -1,133 +1,158 @@
 # 단일 카메라 기반 RC카 자율주행
 
-라즈베리파이 카메라 영상을 PC로 UDP 전송하고, PC에서 OpenCV/ONNX 추론 또는 수동 조작 로직을 수행한 뒤 모터 명령을 다시 RC카로 보내는 단일 카메라 기반 RC카 제어 프로젝트입니다.
+Raspberry Pi 카메라 한 대의 영상을 PC로 전송하고, **모방학습·차선 세그멘테이션·횡단보도 정지·장애물 회피**를 결합해 RC카를 제어한 프로젝트입니다.
 
-이 저장소는 포트폴리오 공개용으로 정리한 버전입니다. 원본 주행 영상, 전체 수집 이미지, 캐시 파일, 대용량 압축 파일, 최종 프로젝트와 직접 관련이 낮은 IR 센서 실험 코드는 제외했습니다.
-
-## 프로젝트 개요
+## 프로젝트 요약
 
 | 구분 | 내용 |
 | --- | --- |
-| 프로젝트 | 단일 카메라 기반 RC카 자율주행 |
-| 목적 | 하나의 카메라 입력으로 주행 영상 수집, 객체 인식, 모터 제어까지 연결 |
-| 플랫폼 | Raspberry Pi, Picamera2, DC Motor, PC |
-| 통신 | UDP 기반 영상 전송 및 모터 명령 피드백 |
-| 영상 처리 | OpenCV, JPEG 인코딩, ONNX Runtime 추론 |
-| 담당 역할 | 라즈베리파이 카메라 송신, PC 수신 서버, UDP 통신, 모터 제어 연동, 수동 주행 데이터 수집, 객체 기반 제어 로직 구현 |
+| 플랫폼 | Raspberry Pi, YAHBOOM RC카, Picamera2 |
+| 통신 | UDP 5002 영상 전송 / UDP 5001 모터 명령 |
+| 기본 주행 | MobileNetV3-Small 기반 모방학습 |
+| 환경 인식 | YOLOv8n-seg 차선·횡단보도, YOLOv8n 장애물 감지 |
+| 영상 처리 | OpenCV, JPEG 인코딩 |
+| 구현 범위 | 주행 데이터 수집, 모델 학습, 비동기 인식, 우선순위 제어, 결과 화면 |
 
-## 핵심 동작
+## 문제와 해결 전략
 
-1. Raspberry Pi에서 Picamera2로 640x480 영상을 캡처합니다.
-2. 프레임을 JPEG로 압축하고, 4바이트 길이 헤더와 함께 PC로 UDP 전송합니다.
-3. PC 서버는 수신한 이미지를 OpenCV로 디코딩합니다.
-4. 수동 제어 모드에서는 `WASD` 키 입력을 모터 명령으로 변환합니다.
-5. 추론 모드에서는 ONNX 모델 결과를 기준으로 객체 위치를 판단합니다.
-6. PC가 `left,right` 형식의 모터 명령을 Raspberry Pi로 다시 전송합니다.
-7. Raspberry Pi가 수신한 명령으로 좌우 DC 모터를 제어합니다.
+차선 마스크의 위치만으로 조향값을 계산하면 S자 커브에서 제어가 불안정했습니다. 실제 운전 데이터를 학습한 모방학습을 기본 주행으로 사용하고, YOLO 인식 결과는 위험 상황에만 개입하는 안전장치로 구성했습니다.
 
-## 폴더 구조
+```text
+횡단보도 정지 > 장애물 회피 > 차선 이탈 보정 > 모방학습 기본 주행
+```
+
+```mermaid
+flowchart LR
+    A["Raspberry Pi<br/>Picamera2"] -->|"JPEG / UDP 5002"| B["PC 주행 서버"]
+    B --> C["MobileNetV3<br/>기본 주행"]
+    B --> D["YOLOv8n-seg<br/>차선·횡단보도"]
+    B --> E["YOLOv8n<br/>장애물"]
+    C --> F["우선순위 제어"]
+    D --> F
+    E --> F
+    F -->|"left,right / UDP 5001"| G["Raspberry Pi<br/>DC 모터 제어"]
+```
+
+## 단계별 구현
+
+### 1. 주행 데이터 수집과 모방학습
+
+- `WASD`와 복합키 입력을 모터값으로 변환했습니다.
+- OpenCV의 단일 키 입력 한계를 키별 만료 시각 추적으로 보완했습니다.
+- 정지 프레임은 저장하지 않아 클래스 불균형을 줄였습니다.
+- MobileNetV3-Small을 밝기·대비 증강과 클래스 가중치로 파인튜닝했습니다.
+
+### 2. 차선 안전장치
+
+- YOLOv8n-seg로 `inline`, `outline`, `crosswalk`를 분할했습니다.
+- 하단 차선 마스크 중심이 화면 중앙에서 130px 이상 벗어난 상태가 연속될 때만 보정했습니다.
+- 차선 추론을 별도 스레드로 분리해 주행 루프 지연을 줄였습니다.
+- 원본 실험 기준 차선 Mask mAP50은 `0.932`였습니다.
+
+### 3. 횡단보도와 장애물 대응
+
+- 횡단보도 신뢰도가 임계값을 넘으면 3초 정지하고 쿨다운으로 중복 정지를 막았습니다.
+- 장애물은 최소 박스 면적과 연속 검출 조건으로 노이즈를 걸렀습니다.
+- 장애물 위치에 따라 회피 조향, 직진, 복귀 조향, 차선 복귀, 쿨다운의 순서로 제어했습니다.
+
+## 실행 영상
+
+- [통합 자율주행 영상](media/autonomous-driving.mp4)
+- [횡단보도 정지·회피 영상](media/crosswalk-avoidance.mp4)
+
+## 저장소 구조
 
 ```text
 .
+├── media/
+│   ├── autonomous-driving.mp4
+│   └── crosswalk-avoidance.mp4
 ├── models/
-│   └── last.onnx                      # PC 추론 서버에서 사용하는 ONNX 모델
+│   └── README.md
 ├── src/
 │   ├── pc/
-│   │   ├── manual_control_server.py   # PC 수동 조작/영상 저장 서버
-│   │   ├── object_following_server.py # PC ONNX 추론 기반 제어 서버
-│   │   └── yolo_detector.py           # ONNX 추론 및 박스 시각화 함수
+│   │   ├── manual_control_server.py
+│   │   ├── imitation_drive_server.py
+│   │   ├── lane_guard_server.py
+│   │   ├── crosswalk_drive_server.py
+│   │   └── integrated_autonomous_server.py
 │   └── raspberry_pi/
-│       └── camera_motor_client.py     # Raspberry Pi 카메라 송신 및 모터 제어
+│       └── camera_motor_client.py
+├── training/
+│   ├── train_imitation.py
+│   ├── train_lane_segmentation.py
+│   └── train_obstacle_detection.py
 ├── requirements-pc.txt
-├── requirements-raspberry-pi.txt
-└── README.md
+└── requirements-raspberry-pi.txt
 ```
 
-## 실행 방법
+## 실행 준비
 
-### 1. PC 환경
+### PC
 
 ```bash
 pip install -r requirements-pc.txt
 ```
 
-수동 주행 및 영상 저장 서버:
+학습된 가중치를 [models/README.md](models/README.md)의 이름에 맞춰 배치한 뒤 최종 서버를 실행합니다.
 
 ```bash
-python src/pc/manual_control_server.py
+python src/pc/integrated_autonomous_server.py
 ```
 
-수동 제어 키:
-
-| 키 | 동작 |
+| 키 | 기능 |
 | --- | --- |
-| `w` | 전진 |
-| `s` | 후진 |
-| `a` | 좌회전 |
-| `d` | 우회전 |
-| `1` | 현재 프레임 저장 |
+| `Space` | 자율주행 일시정지·재개 |
+| `L` | 차선 안전장치 켜기·끄기 |
 | `Esc` | 종료 |
 
-ONNX 추론 기반 제어 서버:
-
-```bash
-python src/pc/object_following_server.py
-```
-
-### 2. Raspberry Pi 환경
+### Raspberry Pi
 
 ```bash
 pip install -r requirements-raspberry-pi.txt
 ```
 
-`src/raspberry_pi/camera_motor_client.py`의 `SERVER_IP` 값을 PC IP 주소로 수정한 뒤 실행합니다.
+PC의 IP를 환경 변수로 지정한 뒤 클라이언트를 실행합니다.
 
 ```bash
+export RC_CAR_SERVER_IP=192.168.0.6
 python src/raspberry_pi/camera_motor_client.py
 ```
 
-라즈베리파이에서는 Picamera2와 GPIO 모터 제어가 필요하므로 일반 Windows PC에서는 실행 대상이 아닙니다.
+Windows PowerShell에서는 `$env:RC_CAR_SERVER_IP="192.168.0.6"` 형식을 사용합니다.
 
-## 제어 흐름
+## 학습
 
-```mermaid
-flowchart LR
-    A["Raspberry Pi 카메라"] --> B["JPEG 인코딩"]
-    B --> C["UDP 영상 전송"]
-    C --> D["PC OpenCV 수신"]
-    D --> E["수동 조작 또는 ONNX 추론"]
-    E --> F["left,right 모터 명령"]
-    F --> G["Raspberry Pi 모터 제어"]
+데이터셋은 공개 저장소에 포함하지 않습니다. 아래 구조로 배치한 뒤 학습 스크립트를 실행합니다.
+
+```text
+data/
+├── drive_dataset/
+├── lane_dataset/
+└── object_dataset/
 ```
 
-## 구현 포인트
-
-- UDP를 사용해 프레임 전송 지연을 줄였습니다.
-- UDP 패킷 앞에 4바이트 길이 정보를 붙여 이미지 데이터 길이를 검증했습니다.
-- JPEG 품질을 낮춰 UDP 단일 패킷 크기 제한을 넘지 않도록 처리했습니다.
-- PC 서버와 Raspberry Pi 클라이언트를 분리해 모델 추론은 PC에서, 모터 제어는 Raspberry Pi에서 수행하도록 구성했습니다.
-- 수동 조작 서버를 통해 실제 주행 데이터를 저장하고, 추론 서버를 통해 객체 위치 기반 제어를 실험했습니다.
-
-## 파일 정리 기준
-
-공개 저장소에는 단일 카메라 RC카 동작을 설명하는 데 필요한 파일만 남겼습니다.
-
-- 포함: 카메라 송신, PC 수신, 모터 명령, ONNX 추론, README, 의존성 파일
-- 제외: `__pycache__`, `.vscode`, 수집 이미지, 주행 영상, zip 파일, IR 센서 기반 라인 트레이싱 실험 코드, 누락 모델을 참조하는 테스트 코드
+```bash
+python training/train_imitation.py
+python training/train_lane_segmentation.py
+python training/train_obstacle_detection.py
+```
 
 ## 트러블슈팅
 
 | 문제 | 원인 | 해결 |
-|---|---|---|
-| PC에서 영상 프레임이 깨지거나 멈춤 | UDP 특성상 패킷 손실이 발생하거나 JPEG 데이터 길이를 정확히 알 수 없음 | 4바이트 길이 헤더를 붙여 수신 길이를 검증하고 JPEG 품질을 낮춰 패킷 크기를 줄임 |
-| Raspberry Pi와 PC가 서로 통신하지 못함 | PC IP, 포트, 같은 네트워크 여부가 맞지 않음 | `SERVER_IP`를 PC의 실제 IP로 수정하고 송수신 포트를 분리해 확인 |
-| Windows PC에서 Raspberry Pi 클라이언트가 실행되지 않음 | `Picamera2`, GPIO 제어는 Raspberry Pi 환경 전용 | PC에서는 `src/pc` 서버만 실행하고, 클라이언트는 Raspberry Pi에서 실행하도록 분리 |
-| 객체 추론은 되지만 제어가 늦게 반응함 | 영상 전송, 디코딩, ONNX 추론, 명령 피드백이 한 루프에 묶여 지연 발생 | 추론은 PC에서 수행하고 Raspberry Pi는 카메라 송신과 모터 제어만 담당하도록 역할을 분리 |
-| 모터 방향이 의도와 반대로 움직임 | DC 모터 배선 또는 좌우 채널 매핑이 실험 환경과 다름 | `left,right` 명령 값을 기준으로 좌우 모터 핀 매핑을 실행 환경에 맞게 조정 |
+| --- | --- | --- |
+| `W+A`, `W+D` 동시 입력이 인식되지 않음 | `cv2.waitKey()`는 한 번에 한 키만 반환 | 키별 만료 시각을 두고 짧은 시간 안의 입력을 조합 |
+| 정지 데이터가 지나치게 많음 | 모든 프레임을 저장하면 `stop`이 대부분을 차지 | 실제 주행 명령이 있는 프레임만 저장 |
+| 차선 추론 중 주행이 끊김 | YOLO 추론이 메인 제어 루프를 차단 | 차선·객체 추론을 별도 스레드로 분리 |
+| 장애물 오감지 | 단일 프레임 노이즈와 작은 원거리 박스 | 연속 검출과 최소 박스 면적 조건 적용 |
+| 회피 후 차선을 벗어남 | 한 번의 조향만으로 복귀 위치를 제어하기 어려움 | 회피·직진·복귀·직진·쿨다운의 단계 제어 적용 |
+| 영상이 깨지거나 수신되지 않음 | UDP 패킷 손실 또는 JPEG 크기 초과 | 4바이트 길이 헤더 검증과 JPEG 품질 조정 |
+| 모터 방향이 반대로 동작 | 실제 배선과 코드의 좌우·정역 매핑 차이 | GPIO 핀과 모터 부호를 차량 배선에 맞게 조정 |
 
-## 한계 및 개선 방향
+## 한계와 향후 개선
 
-- 현재 IP 주소와 GPIO 핀 번호는 실험 환경 기준이므로 실행 환경에 맞게 수정해야 합니다.
-- 단일 카메라만 사용하기 때문에 가까운 장애물의 거리 판단은 제한적입니다.
-- 초음파 센서나 ToF 센서를 추가하면 거리 기반 회피 로직을 더 안정화할 수 있습니다.
-- 추론 서버의 제어 로직은 객체 중심 위치 기반의 단순 제어이므로, 차선 보정과 장애물 회피 우선순위를 더 체계적으로 분리할 수 있습니다.
+- 단안 카메라만으로는 실제 거리를 직접 측정하기 어려워 가까워진 뒤 장애물을 감지할 수 있습니다.
+- 초음파 또는 ToF 센서를 결합하면 거리 기반 조기 회피가 가능합니다.
+- 현재 회피는 시간 기반이므로 주행 속도와 배터리 상태에 영향을 받습니다. 거리·자세 피드백 기반 제어로 개선할 수 있습니다.
+- UDP는 지연이 낮지만 패킷 손실 가능성이 있습니다. 프레임 번호와 누락 감지 로직을 추가할 수 있습니다.
